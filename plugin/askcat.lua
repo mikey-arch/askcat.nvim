@@ -1,7 +1,6 @@
 -- Lazy.nvim plugin specs
 return {
     name = "ai-assistant",
-    dir = vim.fn.stdpath("config") .. "/lua/plugins",  
     lazy = false,
     -- Example config - should customise this
     config = function ()
