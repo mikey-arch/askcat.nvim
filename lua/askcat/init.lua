@@ -282,4 +282,5 @@ function M.setup(opts)
 
     vim.cmd('echo "🐱 askcat loaded: <leader>t to ask, <leader>tt to cancel"')
 end
+
 return M
