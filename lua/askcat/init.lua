@@ -18,9 +18,110 @@ local current_prompt_display = nil
 -- should override in own setup, as this just default common model and local Ollama
 local config = {
     model = "llama3.2:3b",
-    ollama_url = "http://localhost:11434/api/generate",
+    api_url = "http://localhost:11434/api/generate",
+    api_key = nil,
     system_prompt = ""
 }
+
+--- Detect API provider from URL
+---@param url string the API URL
+---@return string The deteced provider type
+local function detect_api_type(url)
+    if url:match("generativelanguage%.googleapis%.com") then
+        return "gemini"
+    else
+        return "ollama"
+    end
+end
+
+--- Build request payload for different providers
+---@param prompt string The user prompt
+---@param api_type string The API provider type
+---@return table The request payload
+local function build_request_payload(prompt, api_type)
+    local full_prompt = ""
+    if config.system_prompt and config.system_prompt ~= "" then
+        full_prompt = config.system_prompt .. "\n\n" .. prompt
+    else
+        full_prompt = prompt
+    end
+
+    if api_type == "gemini" then
+        return {
+            contents = {
+                {
+                    parts = {
+                        { text = full_prompt }
+                    }
+                }
+            },
+            generationConfig = {
+                temperature = 0.7,
+                maxOutputTokens = 1000
+            }
+        }
+    else -- ollama
+        return {
+            model = config.model,
+            prompt = full_prompt,
+            stream = false
+        }
+    end
+end
+
+--- Build curl command for different providers
+---@param payload table The request payload
+---@param api_type string The API provider type
+---@return table The curl command array
+local function build_curl_command(payload, api_type)
+    local cmd = {'curl', '-X', 'POST'}
+    
+    if api_type == "gemini" then
+        local url = config.api_url
+        if not url:match("key=") then
+            url = url .. "?key=" .. (config.api_key or "")
+        end
+        table.insert(cmd, url)
+        table.insert(cmd, '-H')
+        table.insert(cmd, 'Content-Type: application/json')
+        
+    else -- ollama
+        table.insert(cmd, config.api_url)
+        table.insert(cmd, '-H')
+        table.insert(cmd, 'Content-Type: application/json')
+    end
+    
+    table.insert(cmd, '-d')
+    table.insert(cmd, vim.json.encode(payload))
+    
+    return cmd
+end
+
+--- Parse response from different providers
+---@param response_text string The raw response
+---@param api_type string The API provider type
+---@return string|nil The extracted text response
+local function parse_response(response_text, api_type)
+    local success, response = pcall(vim.json.decode, response_text)
+    if not success then
+        return nil
+    end
+
+    if api_type == "gemini" then
+        if response.candidates and response.candidates[1] and 
+           response.candidates[1].content and response.candidates[1].content.parts and
+           response.candidates[1].content.parts[1] then
+            return response.candidates[1].content.parts[1].text
+        end
+        
+    else -- ollama
+        if response.response then
+            return response.response
+        end
+    end
+    
+    return nil
+end
 
 --- Cancel the current query in progress
 ---@return boolean true if a query was cancelled, false otherwise
@@ -42,37 +143,21 @@ local function cancel_query()
     return false
 end
 
---- Ollama API with a prompt
+--- query API with a prompt
 ---@param prompt string The user's prompt
 ---@param callback function Callback to handle the response
-local function query_ollama(prompt, callback)
+local function query_ai(prompt, callback)
     --cancel any existing query first
     if current_job then
         cancel_query()
         vim.wait(100)
     end
 
-    --build prompt with system instructions
-    local full_prompt = ""
-    if config.system_prompt and config.system_prompt ~= "" then
-        full_prompt = config.system_prompt .. "\n\n" .. prompt
-    else
-        full_prompt = prompt
-    end
-
     current_prompt_display = prompt
 
-    local cmd = {
-        'curl',
-        '-X', 'POST',
-        config.ollama_url,
-        '-H', 'Content-Type: application/json',
-        '-d', vim.json.encode({
-            model = config.model,
-            prompt = full_prompt,
-            stream = false
-        })
-    }
+    local api_type = detect_api_type(config.api_url)
+    local payload = build_request_payload(prompt, api_type)
+    local cmd = build_curl_command(payload, api_type)
 
     current_job = vim.system(cmd, { text = true }, function(result)
         -- Check if the job was cancelled 
@@ -84,26 +169,30 @@ local function query_ollama(prompt, callback)
         current_prompt_display = nil
 
         if result.code == 0 then
-            local success, response = pcall(vim.json.decode, result.stdout)
-            if success and response.response then
-                -- Filter out <think>...</think> tags if present (e.g for from DeepSeek model)
-                local filtered_response = response.response
-                filtered_response = filtered_response:gsub("<think>.-</think>%s*", "")
+        local response_text = parse_response(result.stdout, api_type)
+            if response_text then
+                -- Filter out <think>...</think> tags if present
+                local filtered_response = response_text:gsub("<think>.-</think>%s*", "")
                 filtered_response = vim.trim(filtered_response)
-
                 callback(nil, filtered_response, prompt)
             else
-                -- Handle partial JSON from cancellation
-                if result.stdout and #result.stdout < 100 then
-                    return
-                end
-                callback("Error: Failed to parse response", nil, prompt)
+                callback("Error: Failed to parse " .. api_type .. " response", nil, prompt)
             end
         elseif result.signal == 9 or result.signal == 15 or result.code == 143 then
-            -- process was killed dont need to show error
+            -- Process was killed, don't show error
             return
         else
-            callback("Error: " .. (result.stderr or "Unknown error"), nil, prompt)
+            local error_msg = result.stderr or "Unknown error"
+            -- Try to parse error for better messages
+            local success, error_response = pcall(vim.json.decode, result.stdout or "")
+            if success and error_response.error then
+                if type(error_response.error) == "table" and error_response.error.message then
+                    error_msg = error_response.error.message
+                elseif type(error_response.error) == "string" then
+                    error_msg = error_response.error
+                end
+            end
+            callback("Error: " .. error_msg, nil, prompt)
         end
     end)
 end
@@ -211,7 +300,7 @@ local function ask_ai()
     vim.notify("🐱...", vim.log.levels.INFO, { timeout = 1000})
     show_loading(prompt)
 
-    query_ollama(prompt, function(err,resp,original_prompt)
+    query_ai(prompt, function(err,resp,original_prompt)
         vim.schedule(function()
             is_querying = false
 
@@ -259,15 +348,26 @@ end
 
 ---Setup function for the plugin
 ---@param opts table configuration options
----@param opts.model string the Ollama model to use
----@param opts.ollama_url string The Ollama API endpoint
+---@param opts.model string the model to use
+---@param opts.api_url string the API endpint
+---@param opts.api_key string API key (can also be set via env var)
 ---@param opts.system_prompt string System instructions for LLM
 function M.setup(opts)
     opts = opts or {}
 
     if opts.model then config.model = opts.model end
-    if opts.ollama_url then config.ollama_url = opts.ollama_url end
+    if opts.api_url then config.api_url = opts.api_url end
+    if opts.ollama_url then config.api_url = opts.ollama_url end 
+    if opts.api_key then config.api_key = opts.api_key end
     if opts.system_prompt then config.system_prompt = opts.system_prompt end
+
+    -- Auto-detect API key from environment if not provided
+    if not config.api_key then
+        local api_type = detect_api_type(config.api_url)
+        if api_type == "gemini" then
+            config.api_key = os.getenv("GEMINI_API_KEY")
+        end
+    end
 
     -- Register keybindings
     vim.keymap.set({'n', 'x'}, '<leader>t', toggle_window, 
