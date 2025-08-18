@@ -357,7 +357,7 @@ function M.setup(opts)
 
     if opts.model then config.model = opts.model end
     if opts.api_url then config.api_url = opts.api_url end
-    if opts.ollama_url then config.api_url = opts.ollama_url end 
+    -- if opts.ollama_url then config.api_url = opts.ollama_url end 
     if opts.api_key then config.api_key = opts.api_key end
     if opts.system_prompt then config.system_prompt = opts.system_prompt end
 
