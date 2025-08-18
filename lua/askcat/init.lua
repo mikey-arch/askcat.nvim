@@ -380,7 +380,8 @@ function M.setup(opts)
         end
     end, { desc = 'Cancel AI query' })
 
-    vim.cmd('echo "🐱 askcat loaded: <leader>t to ask, <leader>tt to cancel"')
+    local api_type = detect_api_type(config.api_url)
+    vim.cmd('echo "🐱 askcat loaded (' .. api_type .. '): <leader>t to ask, <leader>tt to cancel"')
 end
 
 return M
